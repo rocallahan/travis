@@ -56,13 +56,15 @@ extern crate hyper_tls;
 #[cfg(feature = "tls")]
 use hyper_tls::HttpsConnector;
 
-use futures::{Future as StdFuture, IntoFuture, Stream as StdStream, stream};
+use futures::{Future as StdFuture, IntoFuture, Stream as StdStream, stream, future};
 use futures::future::FutureResult;
 use std::borrow::Cow;
 
-use hyper::{Client as HyperClient, Method, Request, StatusCode, Uri};
+use hyper::{Client as HyperClient, Body, Method, Request, StatusCode, Uri};
 use hyper::client::{Connect, HttpConnector};
 use hyper::header::{Accept, Authorization, ContentType, UserAgent};
+
+pub use hyper::Chunk;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
@@ -376,6 +378,24 @@ where
         }
     }
 
+    pub fn raw_log(&self, job_id: u64) -> Stream<Chunk> {
+        Box::new(
+            self.raw_request(
+                    Method::Get,
+                    None,
+                    format!(
+                        "{host}/job/{job_id}/log.txt",
+                        host = self.host,
+                        job_id = job_id
+                    ).parse()
+                        .map_err(Error::from)
+                        .into_future(),
+                )
+                .map(|stream| stream.map_err(Error::from))
+                .flatten_stream()
+        )
+    }
+
     pub(crate) fn patch<T, B>(
         &self,
         uri: FutureResult<Uri, Error>,
@@ -426,15 +446,12 @@ where
         ))
     }
 
-    pub(crate) fn request<T>(
+    pub(crate) fn raw_request(
         &self,
         method: Method,
         body: Option<Vec<u8>>,
         uri: FutureResult<Uri, Error>,
-    ) -> Future<T>
-    where
-        T: DeserializeOwned + 'static,
-    {
+    ) -> Future<Body> {
         let http_client = self.http.clone();
         let credential = self.credential.clone();
         let response = uri.and_then(move |uri| {
@@ -456,29 +473,49 @@ where
 
             http_client.request(req).map_err(Error::from)
         });
-        let result = response.and_then(|response| {
+        let result = response.and_then(|response| -> Future<Body> {
             let status = response.status();
-            let body = response.body().concat2().map_err(Error::from);
-            body.and_then(move |body| if status.is_success() {
-                debug!("body {}", ::std::str::from_utf8(&body).unwrap());
-                serde_json::from_slice::<T>(&body).map_err(|error| {
-                    ErrorKind::Codec(error).into()
-                })
+            if status.is_success() {
+                Box::new(future::ok(response.body()))
             } else {
-                debug!(
-                    "{} err {}",
-                    status,
-                    ::std::str::from_utf8(&body).unwrap()
-                );
-                match serde_json::from_slice::<ClientError>(&body) {
-                    Ok(error) => Err(
-                        ErrorKind::Fault {
-                            code: status,
-                            error: error.error_message,
-                        }.into(),
-                    ),
-                    Err(error) => Err(ErrorKind::Codec(error).into()),
-                }
+                let body = response.body().concat2().map_err(Error::from);
+                Box::new(body.and_then(move |body| {
+                    debug!(
+                        "{} err {}",
+                        status,
+                        ::std::str::from_utf8(&body).unwrap()
+                    );
+                    match serde_json::from_slice::<ClientError>(&body) {
+                        Ok(error) => Err(
+                            ErrorKind::Fault {
+                                code: status,
+                                error: error.error_message,
+                            }.into(),
+                        ),
+                        Err(error) => Err(ErrorKind::Codec(error).into()),
+                    }
+                }))
+            }
+        });
+
+        Box::new(result)
+    }
+
+    pub(crate) fn request<T>(
+        &self,
+        method: Method,
+        body: Option<Vec<u8>>,
+        uri: FutureResult<Uri, Error>,
+    ) -> Future<T>
+    where
+        T: DeserializeOwned + 'static,
+    {
+        let result = self.raw_request(method, body, uri).and_then(|body| {
+            body.concat2().map_err(Error::from)
+        }).and_then(|body| {
+            debug!("body {}", ::std::str::from_utf8(&body).unwrap());
+            serde_json::from_slice::<T>(&body).map_err(|error| {
+                ErrorKind::Codec(error).into()
             })
         });
 

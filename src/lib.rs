@@ -52,16 +52,20 @@ extern crate url;
 extern crate error_chain;
 #[cfg(feature = "tls")]
 extern crate hyper_tls;
+#[cfg(feature = "rustls")]
+extern crate hyper_rustls;
 
 #[cfg(feature = "tls")]
 use hyper_tls::HttpsConnector;
+#[cfg(feature = "rustls")]
+use hyper_rustls::HttpsConnector;
 
 use futures::{Future as StdFuture, IntoFuture, Stream as StdStream, stream, future};
 use futures::future::FutureResult;
 use std::borrow::Cow;
 
 use hyper::{Client as HyperClient, Body, Method, Request, StatusCode, Uri};
-use hyper::client::{Connect, HttpConnector};
+use hyper::client::Connect;
 use hyper::header::{Accept, Authorization, ContentType, UserAgent};
 
 pub use hyper::Chunk;
@@ -210,13 +214,26 @@ where
 }
 
 #[cfg(feature = "tls")]
-impl Client<HttpsConnector<HttpConnector>> {
+type Connector = HttpsConnector<hyper::client::HttpConnector>;
+#[cfg(feature = "tls")]
+fn create_connector(core: &mut Core) -> Connector {
+  HttpsConnector::new(4, &core.handle()).unwrap()
+}
+#[cfg(feature = "rustls")]
+type Connector = HttpsConnector;
+#[cfg(feature = "rustls")]
+fn create_connector(core: &mut Core) -> Connector {
+  HttpsConnector::new(4, &core.handle())
+}
+
+#[cfg(any(feature = "tls", feature = "rustls"))]
+impl Client<Connector> {
     /// Creates an Travis client for open source github repository builds
     pub fn oss(
         credential: Option<Credential>,
         core: &mut Core,
     ) -> Result<Self> {
-        let connector = HttpsConnector::new(4, &core.handle()).unwrap();
+        let connector = create_connector(core);
         let http = HyperClient::configure()
             .connector(connector)
             .keep_alive(true)
@@ -229,7 +246,7 @@ impl Client<HttpsConnector<HttpConnector>> {
         credential: Option<Credential>,
         core: &mut Core,
     ) -> Result<Self> {
-        let connector = HttpsConnector::new(4, &core.handle()).unwrap();
+        let connector = create_connector(core);
         let http = HyperClient::configure()
             .connector(connector)
             .keep_alive(true)

@@ -73,7 +73,7 @@ pub use hyper::Chunk;
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use std::fmt;
-use tokio_core::reactor::Core;
+use tokio_core::reactor::{Core, Handle};
 use url::percent_encoding::{PATH_SEGMENT_ENCODE_SET, utf8_percent_encode};
 
 pub mod env;
@@ -216,14 +216,14 @@ where
 #[cfg(feature = "tls")]
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "tls")]
-fn create_connector(core: &mut Core) -> Connector {
-  HttpsConnector::new(4, &core.handle()).unwrap()
+fn create_connector(handle: &Handle) -> Connector {
+  HttpsConnector::new(4, handle).unwrap()
 }
 #[cfg(feature = "rustls")]
 type Connector = HttpsConnector;
 #[cfg(feature = "rustls")]
-fn create_connector(core: &mut Core) -> Connector {
-  HttpsConnector::new(4, &core.handle())
+fn create_connector(handle: &Handle) -> Connector {
+  HttpsConnector::new(4, handle)
 }
 
 #[cfg(any(feature = "tls", feature = "rustls"))]
@@ -233,25 +233,42 @@ impl Client<Connector> {
         credential: Option<Credential>,
         core: &mut Core,
     ) -> Result<Self> {
-        let connector = create_connector(core);
-        let http = HyperClient::configure()
-            .connector(connector)
-            .keep_alive(true)
-            .build(&core.handle());
-        Client::custom(OSS_HOST, http, credential, core)
+        let fut = Self::oss_async(credential, &core.handle());
+        core.run(fut)
     }
-
     /// Creates a Travis client for private github repository builds
     pub fn pro(
         credential: Option<Credential>,
         core: &mut Core,
     ) -> Result<Self> {
-        let connector = create_connector(core);
+        let fut = Self::pro_async(credential, &core.handle());
+        core.run(fut)
+    }
+
+    /// Creates an Travis client for open source github repository builds
+    pub fn oss_async(
+        credential: Option<Credential>,
+        handle: &Handle,
+    ) -> Future<Self> {
+        let connector = create_connector(handle);
         let http = HyperClient::configure()
             .connector(connector)
             .keep_alive(true)
-            .build(&core.handle());
-        Client::custom(PRO_HOST, http, credential, core)
+            .build(handle);
+        Client::custom(OSS_HOST, http, credential)
+    }
+
+    /// Creates a Travis client for private github repository builds
+    pub fn pro_async(
+        credential: Option<Credential>,
+        handle: &Handle,
+    ) -> Future<Self> {
+        let connector = create_connector(handle);
+        let http = HyperClient::configure()
+            .connector(connector)
+            .keep_alive(true)
+            .build(handle);
+        Client::custom(PRO_HOST, http, credential)
     }
 }
 
@@ -264,8 +281,7 @@ where
         host: H,
         http: HyperClient<C>,
         credential: Option<Credential>,
-        core: &mut Core,
-    ) -> Result<Self>
+    ) -> Future<Self>
     where
         H: Into<String>,
     {
@@ -349,14 +365,13 @@ where
                         host: host.into(),
                     }
                 });
-
-                core.run(client)
+                Box::new(client)
             }
-            _ => Ok(Self {
+            _ => Box::new(future::ok(Self {
                 http,
                 credential,
                 host: host.into(),
-            }),
+            })),
         }
     }
 

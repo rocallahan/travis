@@ -9,7 +9,7 @@ use std::env;
 
 use futures::{Future as StdFuture, Stream as StdStream, future};
 use futures::stream::futures_unordered;
-use hyper::client::Connect;
+use hyper::client::connect::Connect;
 use tokio_core::reactor::Core;
 use travis::{Client, Future, Result, State, builds, repos};
 

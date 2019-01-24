@@ -4,7 +4,7 @@ use {Branch, Client, Error, Stream, Future, Owner, Pagination, State};
 use futures::{
     future, stream, Future as StdFuture, IntoFuture, Stream as StdStream
     };
-use hyper::client::Connect;
+use hyper::client::connect::Connect;
 use jobs::Job;
 use url::form_urlencoded::Serializer;
 
@@ -94,7 +94,7 @@ impl Default for ListOptions {
 #[derive(Clone)]
 pub struct Builds<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub(crate) travis: Client<C>,
     pub(crate) slug: String,
@@ -102,7 +102,7 @@ where
 
 impl<C> Builds<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub fn list(&self, options: &ListOptions) -> Future<Vec<Build>> {
         Box::new(

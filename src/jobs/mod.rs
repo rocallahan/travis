@@ -4,7 +4,7 @@ use super::{Client, Error, Future, Owner, State};
 use super::commits::Commit;
 use futures::{Future as StdFuture, IntoFuture};
 use futures::future;
-use hyper::client::Connect;
+use hyper::client::connect::Connect;
 
 #[derive(Debug, Deserialize)]
 struct JobsWrapper {
@@ -29,7 +29,7 @@ pub struct Job {
 
 pub struct Jobs<'a, C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub(crate) travis: &'a Client<C>,
     pub(crate) build_id: usize,
@@ -37,7 +37,7 @@ where
 
 impl<'a, C> Jobs<'a, C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub fn list(&self) -> Future<Vec<Job>> {
         Box::new(

@@ -2,7 +2,7 @@
 
 use hyper::Error as HttpError;
 use hyper::StatusCode;
-use hyper::error::UriError;
+use hyper::http::uri::InvalidUri;
 use serde_json::error::Error as SerdeError;
 use std::io::Error as IoError;
 
@@ -22,6 +22,6 @@ error_chain! {
         Codec(SerdeError);
         Http(HttpError);
         IO(IoError);
-        Uri(UriError);
+        Uri(InvalidUri);
     }
 }

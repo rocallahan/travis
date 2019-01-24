@@ -2,7 +2,7 @@
 
 use {Branch, Client, Error, Stream, Future, Owner, Pagination};
 use futures::{future, stream, Future as StdFuture, IntoFuture, Stream as StdStream};
-use hyper::client::Connect;
+use hyper::client::connect::Connect;
 use std::borrow::Cow;
 
 use url::form_urlencoded::Serializer;
@@ -102,14 +102,14 @@ impl Default for ListOptions {
 #[derive(Clone)]
 pub struct Repos<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub(crate) travis: Client<C>,
 }
 
 impl<C> Repos<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     /// get a list of repos for the a given owner (user or org)
     /// todo: add options

@@ -4,7 +4,7 @@ use futures::{Future as StdFuture, IntoFuture};
 use futures::future;
 
 use super::{Client, Error, Future};
-use hyper::client::Connect;
+use hyper::client::connect::Connect;
 use std::borrow::Cow;
 
 #[derive(Debug, Deserialize)]
@@ -54,7 +54,7 @@ pub struct EnvVarPermissions {
 /// via `travis.env("owner/repo")`
 pub struct Env<'a, C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     pub(crate) travis: &'a Client<C>,
     pub(crate) slug: String,
@@ -62,7 +62,7 @@ where
 
 impl<'a, C> Env<'a, C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     /// Return a vector of EnvVars
     pub fn vars(&self) -> Future<Vec<EnvVar>> {

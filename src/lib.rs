@@ -38,7 +38,6 @@
 #[macro_use]
 extern crate derive_builder;
 extern crate futures;
-#[macro_use]
 extern crate hyper;
 #[macro_use]
 extern crate log;
@@ -64,15 +63,16 @@ use futures::{Future as StdFuture, IntoFuture, Stream as StdStream, stream, futu
 use futures::future::FutureResult;
 use std::borrow::Cow;
 
-use hyper::{Client as HyperClient, Body, Method, Request, StatusCode, Uri};
-use hyper::client::Connect;
-use hyper::header::{Accept, Authorization, ContentType, UserAgent};
+use hyper::{Client as HyperClient, Body, Request, StatusCode, Uri};
+use hyper::client::connect::Connect;
+use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 
 pub use hyper::Chunk;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use std::fmt;
+use std::str::FromStr;
 use tokio_core::reactor::{Core, Handle};
 use url::percent_encoding::{PATH_SEGMENT_ENCODE_SET, utf8_percent_encode};
 
@@ -89,11 +89,6 @@ use repos::Repos;
 pub mod error;
 use error::*;
 pub use error::{Error, Result};
-
-header! {
-    #[doc(hidden)]
-    (TravisApiVersion, "Travis-Api-Version") => [String]
-}
 
 const OSS_HOST: &str = "https://api.travis-ci.org";
 const PRO_HOST: &str = "https://api.travis-ci.com";
@@ -206,7 +201,7 @@ pub(crate) fn escape(raw: &str) -> String {
 #[derive(Clone, Debug)]
 pub struct Client<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     http: HyperClient<C>,
     credential: Option<Credential>,
@@ -216,14 +211,14 @@ where
 #[cfg(feature = "tls")]
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "tls")]
-fn create_connector(handle: &Handle) -> Connector {
-  HttpsConnector::new(4, handle).unwrap()
+fn create_connector(_: &Handle) -> Connector {
+  HttpsConnector::new(4).unwrap()
 }
 #[cfg(feature = "rustls")]
-type Connector = HttpsConnector;
+type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "rustls")]
-fn create_connector(handle: &Handle) -> Connector {
-  HttpsConnector::new(4, handle)
+fn create_connector(_: &Handle) -> Connector {
+  HttpsConnector::new(4)
 }
 
 #[cfg(any(feature = "tls", feature = "rustls"))]
@@ -251,10 +246,9 @@ impl Client<Connector> {
         handle: &Handle,
     ) -> Future<Self> {
         let connector = create_connector(handle);
-        let http = HyperClient::configure()
-            .connector(connector)
+        let http = HyperClient::builder()
             .keep_alive(true)
-            .build(handle);
+            .build(connector);
         Client::custom(OSS_HOST, http, credential)
     }
 
@@ -264,17 +258,16 @@ impl Client<Connector> {
         handle: &Handle,
     ) -> Future<Self> {
         let connector = create_connector(handle);
-        let http = HyperClient::configure()
-            .connector(connector)
+        let http = HyperClient::builder()
             .keep_alive(true)
-            .build(handle);
+            .build(connector);
         Client::custom(PRO_HOST, http, credential)
     }
 }
 
 impl<C> Client<C>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + 'static,
 {
     /// Creates a Travis client for hosted versions of travis
     pub fn custom<H>(
@@ -290,35 +283,25 @@ where
                 // exchange github token for travis token
                 let host = host.into();
                 let http_client = http.clone();
-                let uri = format!("{host}/auth/github", host = host)
-                    .parse()
+                let uri = Uri::from_str(&format!("{host}/auth/github", host = host))
                     .map_err(Error::from)
                     .into_future();
                 let response = uri.and_then(move |uri| {
-                    let mut req = Request::new(Method::Post, uri);
-                    {
-                        let mut headers = req.headers_mut();
-                        headers.set(UserAgent::new(
-                            format!("Travis/{}", env!("CARGO_PKG_VERSION")),
-                        ));
-                        headers.set(Accept(vec![
-                            "application/vnd.travis-ci.2+json"
-                                .parse()
-                                .unwrap(),
-                        ]));
-                        headers.set(ContentType::json());
-                    }
-                    req.set_body(
+                    let mut req = Request::post(uri);
+                    req.header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")));
+                    req.header(ACCEPT, "application/vnd.travis-ci.2+json");
+                    req.header(CONTENT_TYPE, "json");
+                    let req = req.body::<Body>(
                         serde_json::to_vec(
                             &GithubToken { github_token: gh.to_owned() },
-                        ).unwrap(),
-                    );
+                        ).unwrap().into(),
+                    ).unwrap();
                     http_client.request(req).map_err(Error::from)
                 });
 
                 let parse = response.and_then(move |response| {
                     let status = response.status();
-                    let body = response.body().concat2().map_err(Error::from);
+                    let body = response.into_body().concat2().map_err(Error::from);
                     body.and_then(move |body| if status.is_success() {
                         debug!(
                             "body {}",
@@ -330,7 +313,7 @@ where
                             },
                         )
                     } else {
-                        if StatusCode::Forbidden == status {
+                        if StatusCode::FORBIDDEN == status {
                             return Err(
                                 ErrorKind::Fault {
                                     code: status,
@@ -413,16 +396,16 @@ where
     pub fn raw_log(&self, job_id: u64) -> Stream<Chunk> {
         Box::new(
             self.raw_request(
-                    Method::Get,
-                    None,
-                    format!(
-                        "{host}/job/{job_id}/log.txt",
-                        host = self.host,
-                        job_id = job_id
-                    ).parse()
-                        .map_err(Error::from)
-                        .into_future(),
-                )
+                "GET",
+                None,
+                format!(
+                    "{host}/job/{job_id}/log.txt",
+                    host = self.host,
+                    job_id = job_id
+                ).parse()
+                    .map_err(Error::from)
+                    .into_future(),
+            )
                 .map(|stream| stream.map_err(Error::from))
                 .flatten_stream()
         )
@@ -438,7 +421,7 @@ where
         B: Serialize,
     {
         self.request::<T>(
-            Method::Patch,
+            "PATCH",
             Some(serde_json::to_vec(&body).unwrap()),
             uri,
         )
@@ -454,7 +437,7 @@ where
         B: Serialize,
     {
         self.request::<T>(
-            Method::Post,
+            "POST",
             Some(serde_json::to_vec(&body).unwrap()),
             uri,
         )
@@ -464,11 +447,11 @@ where
     where
         T: DeserializeOwned + 'static,
     {
-        self.request::<T>(Method::Get, None, uri)
+        self.request::<T>("GET", None, uri)
     }
 
     pub(crate) fn delete(&self, uri: FutureResult<Uri, Error>) -> Future<()> {
-        Box::new(self.request::<()>(Method::Delete, None, uri).then(
+        Box::new(self.request::<()>("DELETE", None, uri).then(
             |result| {
                 match result {
                     Err(Error(ErrorKind::Codec(_), _)) => Ok(()),
@@ -480,37 +463,32 @@ where
 
     pub(crate) fn raw_request(
         &self,
-        method: Method,
+        method: &'static str,
         body: Option<Vec<u8>>,
         uri: FutureResult<Uri, Error>,
     ) -> Future<Body> {
         let http_client = self.http.clone();
         let credential = self.credential.clone();
         let response = uri.and_then(move |uri| {
-            let mut req = Request::new(method, uri);
-            {
-                let mut headers = req.headers_mut();
-                headers.set(UserAgent::new(
-                    format!("Travis/{}", env!("CARGO_PKG_VERSION")),
-                ));
-                headers.set(TravisApiVersion("3".into()));
-                headers.set(ContentType::json());
-                if let Some(Credential::Token(ref token)) = credential {
-                    headers.set(Authorization(format!("token {}", token)))
-                }
+            let mut req = Request::builder();
+            req.method(method);
+            req.uri(uri);
+            req.header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")));
+            req.header("Travis-Api-Version", "3");
+            req.header(CONTENT_TYPE, "json");
+            if let Some(Credential::Token(ref token)) = credential {
+                req.header(AUTHORIZATION, format!("token {}", token));
             }
-            for b in body {
-                req.set_body(b);
-            }
-
+            let body: Option<Body> = body.map(|b| b.into());
+            let req = req.body::<Body>(body.unwrap_or_else(Body::empty)).unwrap();
             http_client.request(req).map_err(Error::from)
         });
         let result = response.and_then(|response| -> Future<Body> {
             let status = response.status();
             if status.is_success() {
-                Box::new(future::ok(response.body()))
+                Box::new(future::ok(response.into_body()))
             } else {
-                let body = response.body().concat2().map_err(Error::from);
+                let body = response.into_body().concat2().map_err(Error::from);
                 Box::new(body.and_then(move |body| {
                     debug!(
                         "{} err {}",
@@ -535,7 +513,7 @@ where
 
     pub(crate) fn request<T>(
         &self,
-        method: Method,
+        method: &'static str,
         body: Option<Vec<u8>>,
         uri: FutureResult<Uri, Error>,
     ) -> Future<T>

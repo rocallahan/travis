@@ -1,7 +1,7 @@
 extern crate env_logger;
 extern crate futures;
 extern crate openssl_probe;
-extern crate tokio_core;
+extern crate tokio;
 extern crate travis;
 extern crate hyper;
 
@@ -10,7 +10,7 @@ use std::env;
 use futures::{Future as StdFuture, Stream as StdStream, future};
 use futures::stream::futures_unordered;
 use hyper::client::connect::Connect;
-use tokio_core::reactor::Core;
+use tokio::runtime::current_thread::Runtime;
 use travis::{Client, Future, Result, State, builds, repos};
 
 fn jobs<C>(state: State, builds: builds::Builds<C>) -> Future<usize>
@@ -41,11 +41,11 @@ fn run() -> Result<()> {
     env_logger::init();
     openssl_probe::init_ssl_cert_env_vars();
 
-    let mut core = Core::new()?;
+    let mut rt = Runtime::new()?;
     let travis = Client::oss(
         None,
-        // core for credential exchange ( if needed )
-        &mut core,
+        // rt for credential exchange ( if needed )
+        &mut rt,
     )?;
 
     // all passed/failed jobs
@@ -79,7 +79,7 @@ fn run() -> Result<()> {
         );
 
     // Start the event loop, driving the asynchronous code to completion.
-    Ok(println!("{:#?}", core.run(work)))
+    Ok(println!("{:#?}", rt.block_on(work)))
 }
 
 fn main() {

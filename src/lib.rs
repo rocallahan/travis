@@ -13,18 +13,18 @@
 //! // travis interfaces
 //! extern crate travis;
 //! // tokio async io
-//! extern crate tokio_core;
+//! extern crate tokio;
 //!
-//! use tokio_core::reactor::Core;
+//! use tokio::runtime::current_thread::Runtime;
 //! use travis::{Client, Credential};
 //!
 //! fn main() {
-//!   let mut core = Core::new().unwrap();
+//!   let mut rt = Runtime::new().unwrap();
 //!   let travis = Client::oss(
 //!     Some(Credential::Github(
 //!       String::from("gh-access-token")
 //!     )),
-//!     &mut core
+//!     &mut rt
 //!   );
 //! }
 //! ```
@@ -45,7 +45,7 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-extern crate tokio_core;
+extern crate tokio;
 extern crate url;
 #[macro_use]
 extern crate error_chain;
@@ -73,7 +73,7 @@ use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use std::fmt;
 use std::str::FromStr;
-use tokio_core::reactor::{Core, Handle};
+use tokio::runtime::current_thread::Runtime;
 use url::percent_encoding::{PATH_SEGMENT_ENCODE_SET, utf8_percent_encode};
 
 pub mod env;
@@ -211,13 +211,13 @@ where
 #[cfg(feature = "tls")]
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "tls")]
-fn create_connector(_: &Handle) -> Connector {
+fn create_connector() -> Connector {
   HttpsConnector::new(4).unwrap()
 }
 #[cfg(feature = "rustls")]
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "rustls")]
-fn create_connector(_: &Handle) -> Connector {
+fn create_connector() -> Connector {
   HttpsConnector::new(4)
 }
 
@@ -226,26 +226,25 @@ impl Client<Connector> {
     /// Creates an Travis client for open source github repository builds
     pub fn oss(
         credential: Option<Credential>,
-        core: &mut Core,
+        rt: &mut Runtime,
     ) -> Result<Self> {
-        let fut = Self::oss_async(credential, &core.handle());
-        core.run(fut)
+        let fut = Self::oss_async(credential);
+        rt.block_on(fut)
     }
     /// Creates a Travis client for private github repository builds
     pub fn pro(
         credential: Option<Credential>,
-        core: &mut Core,
+        rt: &mut Runtime,
     ) -> Result<Self> {
-        let fut = Self::pro_async(credential, &core.handle());
-        core.run(fut)
+        let fut = Self::pro_async(credential);
+        rt.block_on(fut)
     }
 
     /// Creates an Travis client for open source github repository builds
     pub fn oss_async(
         credential: Option<Credential>,
-        handle: &Handle,
     ) -> Future<Self> {
-        let connector = create_connector(handle);
+        let connector = create_connector();
         let http = HyperClient::builder()
             .keep_alive(true)
             .build(connector);
@@ -255,9 +254,8 @@ impl Client<Connector> {
     /// Creates a Travis client for private github repository builds
     pub fn pro_async(
         credential: Option<Credential>,
-        handle: &Handle,
     ) -> Future<Self> {
-        let connector = create_connector(handle);
+        let connector = create_connector();
         let http = HyperClient::builder()
             .keep_alive(true)
             .build(connector);

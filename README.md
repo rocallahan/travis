@@ -19,23 +19,23 @@ a `Client`
 
 ```rust
 extern crate travis;
-extern crate tokio_core;
+extern crate tokio;
 
 use std::env;
 
-use tokio_core::reactor::Core;
+use tokio::runtime::current_thread::Runtime;
 
 use travis::{Client, Credential, Result};
 
 fn run() -> Result<()> {
-    let mut core = Core::new()?;
+    let mut tr = Runtime::new()?;
     let travis = Client::pro(
         // authentication credentials
         env::var("GH_TOKEN").ok().map(
             |token| Credential::Github(token),
         ),
-        // core for credential exchange ( if needed )
-        &mut core,
+        // rt for credential exchange ( if needed )
+        &mut rt,
     )?;
     Ok(())
 }

@@ -186,10 +186,10 @@ pub struct Owner {
 }
 
 /// A type alias for `Futures` that may return `travis::Errors`
-pub type Future<T> = Box<StdFuture<Item = T, Error = Error>>;
+pub type Future<T> = Box<dyn StdFuture<Item = T, Error = Error>>;
 
 /// A type alias for `Streams` that may result in `travis::Errors`
-pub type Stream<T> = Box<stream::Stream<Item = T, Error = Error>>;
+pub type Stream<T> = Box<dyn stream::Stream<Item = T, Error = Error>>;
 
 pub(crate) fn escape(raw: &str) -> String {
     utf8_percent_encode(raw, PATH_SEGMENT_ENCODE_SET).to_string()

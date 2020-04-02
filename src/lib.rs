@@ -41,6 +41,7 @@ extern crate futures;
 extern crate hyper;
 #[macro_use]
 extern crate log;
+extern crate percent_encoding;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -74,7 +75,7 @@ use serde::ser::Serialize;
 use std::fmt;
 use std::str::FromStr;
 use tokio::runtime::current_thread::Runtime;
-use url::percent_encoding::{PATH_SEGMENT_ENCODE_SET, utf8_percent_encode};
+use percent_encoding::{AsciiSet, utf8_percent_encode};
 
 pub mod env;
 use env::Env;
@@ -89,6 +90,19 @@ use repos::Repos;
 pub mod error;
 use error::*;
 pub use error::{Error, Result};
+
+/// https://url.spec.whatwg.org/#fragment-percent-encode-set
+const FRAGMENT_ENCODE_SET: &AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`');
+
+/// https://url.spec.whatwg.org/#path-percent-encode-set
+const PATH_ENCODE_SET: &AsciiSet = &FRAGMENT_ENCODE_SET.add(b'#').add(b'?').add(b'{').add(b'}');
+
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &PATH_ENCODE_SET.add(b'/').add(b'%');
 
 const OSS_HOST: &str = "https://api.travis-ci.org";
 const PRO_HOST: &str = "https://api.travis-ci.com";

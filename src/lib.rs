@@ -15,7 +15,7 @@
 //! // tokio async io
 //! extern crate tokio;
 //!
-//! use tokio::runtime::current_thread::Runtime;
+//! use tokio::runtime::Runtime;
 //! use travis::{Client, Credential};
 //!
 //! fn main() {
@@ -60,21 +60,21 @@ use hyper_tls::HttpsConnector;
 #[cfg(feature = "rustls")]
 use hyper_rustls::HttpsConnector;
 
-use futures::{Future as StdFuture, IntoFuture, Stream as StdStream, stream, future};
-use futures::future::FutureResult;
+use futures::prelude::*;
 use std::borrow::Cow;
+use std::pin::Pin;
 
 use hyper::{Client as HyperClient, Body, Request, StatusCode, Uri};
+use hyper::body;
+pub use hyper::body::Bytes;
 use hyper::client::connect::Connect;
 use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-
-pub use hyper::Chunk;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use std::fmt;
 use std::str::FromStr;
-use tokio::runtime::current_thread::Runtime;
+use tokio::runtime::Runtime;
 use percent_encoding::{AsciiSet, utf8_percent_encode};
 
 pub mod env;
@@ -200,10 +200,10 @@ pub struct Owner {
 }
 
 /// A type alias for `Futures` that may return `travis::Errors`
-pub type Future<T> = Box<dyn StdFuture<Item = T, Error = Error>>;
+pub type Future<T> = Pin<Box<dyn future::Future<Output = Result<T>> + Send>>;
 
 /// A type alias for `Streams` that may result in `travis::Errors`
-pub type Stream<T> = Box<dyn stream::Stream<Item = T, Error = Error>>;
+pub type Stream<T> = Pin<Box<dyn stream::Stream<Item = Result<T>> + Send>>;
 
 pub(crate) fn escape(raw: &str) -> String {
     utf8_percent_encode(raw, PATH_SEGMENT_ENCODE_SET).to_string()
@@ -215,7 +215,7 @@ pub(crate) fn escape(raw: &str) -> String {
 #[derive(Clone, Debug)]
 pub struct Client<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     http: HyperClient<C>,
     credential: Option<Credential>,
@@ -226,13 +226,13 @@ where
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "tls")]
 fn create_connector() -> Connector {
-  HttpsConnector::new(4).unwrap()
+  HttpsConnector::new().unwrap()
 }
 #[cfg(feature = "rustls")]
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "rustls")]
 fn create_connector() -> Connector {
-  HttpsConnector::new(4)
+  HttpsConnector::new()
 }
 
 #[cfg(any(feature = "tls", feature = "rustls"))]
@@ -279,7 +279,7 @@ impl Client<Connector> {
 
 impl<C> Client<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     /// Creates a Travis client for hosted versions of travis
     pub fn custom<H>(
@@ -296,13 +296,12 @@ where
                 let host = host.into();
                 let http_client = http.clone();
                 let uri = Uri::from_str(&format!("{host}/auth/github", host = host))
-                    .map_err(Error::from)
-                    .into_future();
-                let response = uri.and_then(move |uri| {
-                    let mut req = Request::post(uri);
-                    req.header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")));
-                    req.header(ACCEPT, "application/vnd.travis-ci.2+json");
-                    req.header(CONTENT_TYPE, "json");
+                    .map_err(Error::from);
+                let response = future::ready(uri).and_then(move |uri| {
+                    let req = Request::post(uri)
+                        .header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")))
+                        .header(ACCEPT, "application/vnd.travis-ci.2+json")
+                        .header(CONTENT_TYPE, "json");
                     let req = req.body::<Body>(
                         serde_json::to_vec(
                             &GithubToken { github_token: gh.to_owned() },
@@ -313,45 +312,47 @@ where
 
                 let parse = response.and_then(move |response| {
                     let status = response.status();
-                    let body = response.into_body().concat2().map_err(Error::from);
-                    body.and_then(move |body| if status.is_success() {
-                        debug!(
-                            "body {}",
-                            ::std::str::from_utf8(&body).unwrap()
-                        );
-                        serde_json::from_slice::<AccessToken>(&body).map_err(
-                            |error| {
-                                ErrorKind::Codec(error).into()
-                            },
-                        )
-                    } else {
-                        if StatusCode::FORBIDDEN == status {
-                            return Err(
-                                ErrorKind::Fault {
-                                    code: status,
-                                    error: String::from_utf8_lossy(&body)
-                                        .into_owned()
-                                        .clone(),
-                                }.into(),
+                    let body = body::to_bytes(response.into_body()).map_err(Error::from);
+                    body.and_then(move |body| async move {
+                        if status.is_success() {
+                            debug!(
+                                "body {}",
+                                ::std::str::from_utf8(&body).unwrap()
                             );
-                        }
-                        debug!(
-                            "{} err {}",
-                            status,
-                            ::std::str::from_utf8(&body).unwrap()
-                        );
-                        match serde_json::from_slice::<ClientError>(&body) {
-                            Ok(error) => Err(
-                                ErrorKind::Fault {
-                                    code: status,
-                                    error: error.error_message,
-                                }.into(),
-                            ),
-                            Err(error) => Err(ErrorKind::Codec(error).into()),
+                            serde_json::from_slice::<AccessToken>(&body).map_err(
+                                |error| {
+                                    ErrorKind::Codec(error).into()
+                                },
+                            )
+                        } else {
+                            if StatusCode::FORBIDDEN == status {
+                                return Err(
+                                    ErrorKind::Fault {
+                                        code: status,
+                                        error: String::from_utf8_lossy(&body)
+                                            .into_owned()
+                                            .clone(),
+                                    }.into(),
+                                );
+                            }
+                            debug!(
+                                "{} err {}",
+                                status,
+                                ::std::str::from_utf8(&body).unwrap()
+                            );
+                            match serde_json::from_slice::<ClientError>(&body) {
+                                Ok(error) => Err(
+                                    ErrorKind::Fault {
+                                        code: status,
+                                        error: error.error_message,
+                                    }.into(),
+                                ),
+                                Err(error) => Err(ErrorKind::Codec(error).into()),
+                            }
                         }
                     })
                 });
-                let client = parse.map(move |access| {
+                let client = parse.map_ok(move |access| {
                     Self {
                         http,
                         credential: Some(Credential::Token(
@@ -360,9 +361,9 @@ where
                         host: host.into(),
                     }
                 });
-                Box::new(client)
+                Box::pin(client)
             }
-            _ => Box::new(future::ok(Self {
+            _ => Box::pin(future::ok(Self {
                 http,
                 credential,
                 host: host.into(),
@@ -405,65 +406,73 @@ where
         }
     }
 
-    pub fn raw_log(&self, job_id: u64) -> Stream<Chunk> {
-        Box::new(
+    pub fn raw_log(&self, job_id: u64) -> Stream<Bytes> {
+        let host = self.host.clone();
+        Box::pin(
             self.raw_request(
                 "GET",
                 None,
-                format!(
-                    "{host}/job/{job_id}/log.txt",
-                    host = self.host,
-                    job_id = job_id
-                ).parse()
-                    .map_err(Error::from)
-                    .into_future(),
+                async move {
+                    format!(
+                        "{host}/job/{job_id}/log.txt",
+                        host = host,
+                        job_id = job_id
+                    ).parse()
+                        .map_err(Error::from)
+                }
             )
-                .map(|stream| stream.map_err(Error::from))
-                .flatten_stream()
+                .map_ok(|stream| stream.map_err(Error::from))
+                .try_flatten_stream()
         )
     }
 
-    pub(crate) fn patch<T, B>(
+    pub(crate) fn patch<T, B, U>(
         &self,
-        uri: FutureResult<Uri, Error>,
+        uri: U,
         body: B,
     ) -> Future<T>
     where
         T: DeserializeOwned + 'static,
         B: Serialize,
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
     {
-        self.request::<T>(
+        self.request::<T, U>(
             "PATCH",
             Some(serde_json::to_vec(&body).unwrap()),
             uri,
         )
     }
 
-    pub(crate) fn post<T, B>(
+    pub(crate) fn post<T, B, U>(
         &self,
-        uri: FutureResult<Uri, Error>,
+        uri: U,
         body: B,
     ) -> Future<T>
     where
         T: DeserializeOwned + 'static,
         B: Serialize,
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
     {
-        self.request::<T>(
+        self.request::<T, U>(
             "POST",
             Some(serde_json::to_vec(&body).unwrap()),
             uri,
         )
     }
 
-    pub(crate) fn get<T>(&self, uri: FutureResult<Uri, Error>) -> Future<T>
+    pub(crate) fn get<T, U>(&self, uri: U) -> Future<T>
     where
         T: DeserializeOwned + 'static,
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
     {
-        self.request::<T>("GET", None, uri)
+        self.request::<T, U>("GET", None, uri)
     }
 
-    pub(crate) fn delete(&self, uri: FutureResult<Uri, Error>) -> Future<()> {
-        Box::new(self.request::<()>("DELETE", None, uri).then(
+    pub(crate) fn delete<U>(&self, uri: U) -> Future<()>
+    where
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
+    {
+        Box::pin(self.request::<(), U>("DELETE", None, uri).map(
             |result| {
                 match result {
                     Err(Error(ErrorKind::Codec(_), _)) => Ok(()),
@@ -473,23 +482,26 @@ where
         ))
     }
 
-    pub(crate) fn raw_request(
+    pub(crate) fn raw_request<U>(
         &self,
         method: &'static str,
         body: Option<Vec<u8>>,
-        uri: FutureResult<Uri, Error>,
-    ) -> Future<Body> {
+        uri: U,
+    ) -> Future<Body>
+    where
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
+    {
         let http_client = self.http.clone();
         let credential = self.credential.clone();
         let response = uri.and_then(move |uri| {
-            let mut req = Request::builder();
-            req.method(method);
-            req.uri(uri);
-            req.header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")));
-            req.header("Travis-Api-Version", "3");
-            req.header(CONTENT_TYPE, "json");
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(USER_AGENT, format!("Travis/{}", env!("CARGO_PKG_VERSION")))
+                .header("Travis-Api-Version", "3")
+                .header(CONTENT_TYPE, "json");
             if let Some(Credential::Token(ref token)) = credential {
-                req.header(AUTHORIZATION, format!("token {}", token));
+                req = req.header(AUTHORIZATION, format!("token {}", token));
             }
             let body: Option<Body> = body.map(|b| b.into());
             let req = req.body::<Body>(body.unwrap_or_else(Body::empty)).unwrap();
@@ -498,10 +510,10 @@ where
         let result = response.and_then(|response| -> Future<Body> {
             let status = response.status();
             if status.is_success() {
-                Box::new(future::ok(response.into_body()))
+                Box::pin(future::ok(response.into_body()))
             } else {
-                let body = response.into_body().concat2().map_err(Error::from);
-                Box::new(body.and_then(move |body| {
+                let body = body::to_bytes(response.into_body()).map_err(Error::from);
+                Box::pin(body.and_then(move |body| async move {
                     debug!(
                         "{} err {}",
                         status,
@@ -520,28 +532,29 @@ where
             }
         });
 
-        Box::new(result)
+        Box::pin(result)
     }
 
-    pub(crate) fn request<T>(
+    pub(crate) fn request<T, U>(
         &self,
         method: &'static str,
         body: Option<Vec<u8>>,
-        uri: FutureResult<Uri, Error>,
+        uri: U,
     ) -> Future<T>
     where
         T: DeserializeOwned + 'static,
+        U: future::Future<Output = Result<Uri>> + Send + 'static,
     {
         let result = self.raw_request(method, body, uri).and_then(|body| {
-            body.concat2().map_err(Error::from)
-        }).and_then(|body| {
+            body::to_bytes(body).map_err(Error::from)
+        }).and_then(|body| async move {
             debug!("body {}", ::std::str::from_utf8(&body).unwrap());
             serde_json::from_slice::<T>(&body).map_err(|error| {
                 ErrorKind::Codec(error).into()
             })
         });
 
-        Box::new(result)
+        Box::pin(result)
     }
 }
 

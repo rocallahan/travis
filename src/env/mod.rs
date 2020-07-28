@@ -1,7 +1,6 @@
 //! interfaces for interacting with travis envs
 
-use futures::{Future as StdFuture, IntoFuture};
-use futures::future;
+use futures::prelude::*;
 
 use super::{Client, Error, Future};
 use hyper::client::connect::Connect;
@@ -54,7 +53,7 @@ pub struct EnvVarPermissions {
 /// via `travis.env("owner/repo")`
 pub struct Env<'a, C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub(crate) travis: &'a Client<C>,
     pub(crate) slug: String,
@@ -62,21 +61,22 @@ where
 
 impl<'a, C> Env<'a, C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     /// Return a vector of EnvVars
     pub fn vars(&self) -> Future<Vec<EnvVar>> {
-        Box::new(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        Box::pin(
             self.travis
-                .get(
+                .get(async move {
                     format!(
                         "{host}/repo/{slug}/env_vars",
-                        host = self.travis.host,
-                        slug = self.slug
+                        host = host,
+                        slug = slug
                     ).parse()
                         .map_err(Error::from)
-                        .into_future(),
-                )
+                })
                 .and_then(
                     |wrapper: EnvVarsWrapper| future::ok(wrapper.env_vars),
                 ),
@@ -88,16 +88,18 @@ where
     where
         V: Into<Cow<'v, str>>,
     {
-        self.travis.get(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        let var_id = var_id.into().to_string();
+        self.travis.get(async move {
             format!(
                 "{host}/repo/{slug}/env_var/{var_id}",
-                host = self.travis.host,
-                slug = self.slug,
-                var_id = var_id.into()
+                host = host,
+                slug = slug,
+                var_id = var_id,
             ).parse()
                 .map_err(Error::from)
-                .into_future(),
-        )
+        })
     }
 
     /// updates the contents of an env var
@@ -109,30 +111,35 @@ where
     where
         V: Into<Cow<'v, str>>,
     {
-        self.travis.patch(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        let var_id = var_id.into().to_string();
+        self.travis.patch(async move {
             format!(
                 "{host}/repo/{slug}/env_var/{var_id}",
-                host = self.travis.host,
-                slug = self.slug,
-                var_id = var_id.into()
+                host = host,
+                slug = slug,
+                var_id = var_id,
             ).parse()
                 .map_err(Error::from)
-                .into_future(),
-            options,
+        },
+                          options,
         )
     }
 
     /// sets a new env var for this repo
     pub fn set(&self, options: EnvVarCreate) -> Future<EnvVar> {
-        self.travis.post(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        self.travis.post(async move {
             format!(
                 "{host}/repo/{slug}/env_vars",
-                host = self.travis.host,
-                slug = self.slug
+                host = host,
+                slug = slug
             ).parse()
                 .map_err(Error::from)
-                .into_future(),
-            options,
+        },
+                         options,
         )
     }
 
@@ -141,15 +148,17 @@ where
     where
         V: Into<Cow<'v, str>>,
     {
-        self.travis.delete(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        let var_id = var_id.into().to_string();
+        self.travis.delete(async move {
             format!(
                 "{host}/repo/{slug}/env_var/{var_id}",
-                host = self.travis.host,
-                slug = self.slug,
-                var_id = var_id.into()
+                host = host,
+                slug = slug,
+                var_id = var_id,
             ).parse()
                 .map_err(Error::from)
-                .into_future(),
-        )
+        })
     }
 }

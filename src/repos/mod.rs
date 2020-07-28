@@ -1,7 +1,7 @@
 //! Interfaces for interacting with travis repositories
 
-use {Branch, Client, Error, Stream, Future, Owner, Pagination};
-use futures::{future, stream, Future as StdFuture, IntoFuture, Stream as StdStream};
+use super::{Branch, Client, Error, Stream, Future, Owner, Pagination};
+use futures::prelude::*;
 use hyper::client::connect::Connect;
 use std::borrow::Cow;
 
@@ -102,14 +102,14 @@ impl Default for ListOptions {
 #[derive(Clone)]
 pub struct Repos<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub(crate) travis: Client<C>,
 }
 
 impl<C> Repos<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     /// get a list of repos for the a given owner (user or org)
     /// todo: add options
@@ -122,18 +122,20 @@ where
     where
         O: Into<Cow<'b, str>>,
     {
-        Box::new(
+        let host = self.travis.host.clone();
+        let owner = owner.into().to_string();
+        let options = options.into_query_string();
+        Box::pin(
             self.travis
-                .get(
+                .get(async move {
                     format!(
                         "{host}/owner/{owner}/repos??{query}",
-                        host = self.travis.host,
-                        owner = owner.into().as_ref(),
-                        query = options.into_query_string()
+                        host = host,
+                        owner = owner,
+                        query = options,
                     ).parse()
                         .map_err(Error::from)
-                        .into_future(),
-                )
+                })
                 .and_then(|wrapper: Wrapper| future::ok(wrapper.repositories)),
         )
     }
@@ -146,18 +148,22 @@ where
     where
         O: Into<String>,
     {
+        let host = self.travis.host.clone();
+        let owner = owner.into().clone();
+        let options = options.into_query_string();
         let first = self.travis
-            .get::<Wrapper>(
-                format!(
-                    "{host}/owner/{owner}/repos?{query}",
-                    host = self.travis.host,
-                    owner = owner.into().clone(),
-                    query = options.into_query_string()
-                ).parse()
-                    .map_err(Error::from)
-                    .into_future(),
+            .get::<Wrapper, _>(
+                async move {
+                    format!(
+                        "{host}/owner/{owner}/repos?{query}",
+                        host = host,
+                        owner = owner,
+                        query = options,
+                    ).parse()
+                        .map_err(Error::from)
+                }
             )
-            .map(|mut wrapper: Wrapper| {
+            .map_ok(|mut wrapper: Wrapper| {
                 let mut repositories = wrapper.repositories;
                 repositories.reverse();
                 wrapper.repositories = repositories;
@@ -165,51 +171,53 @@ where
             });
         // needed to move "self" into the closure below
         let clone = self.clone();
-        Box::new(
+        Box::pin(
             first
-                .map(move |wrapper| {
-                    stream::unfold::<_, _, Future<(Repository, Wrapper)>, _>(
+                .map_ok(move |wrapper| {
+                    stream::try_unfold::<_, _, Future<Option<(Repository, Wrapper)>>, _>(
                         wrapper,
                         move |mut state| match state.repositories.pop() {
-                            Some(repository) => Some(Box::new(
-                                future::ok((repository, state)),
-                            )),
+                            Some(repository) => Box::pin(
+                                future::ok(Some((repository, state))),
+                            ),
                             _ => {
-                                state.pagination.next.clone().map(|path| {
-                                    Box::new(
+                                let host = clone.travis.host.clone();
+                                match state.pagination.next.clone() {
+                                    Some(path) => 
+                                    Box::pin(
                                         clone
                                             .travis
-                                            .get::<Wrapper>(
+                                            .get::<Wrapper, _>(async move {
                                                 format!(
                                                     "{host}{path}",
-                                                    host = clone.travis.host,
+                                                    host = host,
                                                     path = path.href
                                                 ).parse()
                                                     .map_err(Error::from)
-                                                    .into_future(),
-                                            )
-                                            .map(|mut next| {
+                                            })
+                                            .map_ok(|mut next| {
                                                 let mut repositories =
                                                     next.repositories;
                                                 repositories.reverse();
                                                 next.repositories =
                                                     repositories;
-                                                (
+                                                Some((
                                                     next.repositories
                                                         .pop()
                                                         .unwrap(),
                                                     next,
-                                                )
+                                                ))
                                             }),
                                     ) as
-                                        Future<(Repository, Wrapper)>
-                                })
+                                        Future<Option<(Repository, Wrapper)>>,
+                                    None => Box::pin(future::ok(None))
+                                }
                             }
                         },
                     )
                 })
                 .into_stream()
-                .flatten(),
+                .try_flatten(),
         )
     }
 }

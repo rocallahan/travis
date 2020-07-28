@@ -7,25 +7,25 @@ extern crate hyper;
 
 use std::env;
 
-use futures::{Future as StdFuture, Stream as StdStream, future};
-use futures::stream::futures_unordered;
+use futures::prelude::*;
+use futures::stream::futures_unordered::FuturesUnordered;
 use hyper::client::connect::Connect;
-use tokio::runtime::current_thread::Runtime;
+use tokio::runtime::Runtime;
 use travis::{Client, Future, Result, State, builds, repos};
 
 fn jobs<C>(state: State, builds: builds::Builds<C>) -> Future<usize>
 where
-    C: Clone + Connect,
+    C: Clone + Connect + Send + Sync,
 {
-    Box::new(
+    Box::pin(
         builds
             .iter(&builds::ListOptions::builder()
                 .state(state.clone())
                 .include(vec!["build.jobs".into()])
                 .build()
                 .unwrap())
-            .fold::<_, _, Future<usize>>(0, move |acc, build| {
-                Box::new(future::ok(
+            .try_fold::<_, Future<usize>, _>(0, move |acc, build| {
+                Box::pin(future::ok(
                     acc +
                         build
                             .jobs
@@ -57,22 +57,23 @@ fn run() -> Result<()> {
                 .limit(100)
                 .build()?,
         )
-        .map(|repo| {
+        .map_ok(|repo| {
             let builds = travis.builds(&repo.slug);
             let passed = jobs(State::Passed, builds.clone());
             let failed = jobs(State::Failed, builds);
-            futures_unordered(vec![
-                passed.join(failed).and_then(
+            vec![
+                future::try_join(passed, failed).and_then(
                     move |(p, f)| future::ok((repo.slug, p, f))
                 ),
-            ])
+            ].into_iter()
+                .collect::<FuturesUnordered<_>>()
         })
-        .flatten()
-        .fold::<_, _, Future<(usize, usize)>>(
+        .try_flatten()
+        .try_fold::<_, Future<(usize, usize)>, _>(
             (0, 0),
             |(all_passed, all_failed), (slug, passed, failed)| {
                 println!("{} ({}, {})", slug, passed, failed);
-                Box::new(
+                Box::pin(
                     future::ok((all_passed + passed, all_failed + failed)),
                 )
             },

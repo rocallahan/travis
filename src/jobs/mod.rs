@@ -2,8 +2,7 @@
 
 use super::{Client, Error, Future, Owner, State};
 use super::commits::Commit;
-use futures::{Future as StdFuture, IntoFuture};
-use futures::future;
+use futures::prelude::*;
 use hyper::client::connect::Connect;
 
 #[derive(Debug, Deserialize)]
@@ -29,7 +28,7 @@ pub struct Job {
 
 pub struct Jobs<'a, C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub(crate) travis: &'a Client<C>,
     pub(crate) build_id: usize,
@@ -37,20 +36,21 @@ where
 
 impl<'a, C> Jobs<'a, C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub fn list(&self) -> Future<Vec<Job>> {
-        Box::new(
+        let host = self.travis.host.clone();
+        let build_id = self.build_id;
+        Box::pin(
             self.travis
-                .get(
+                .get(async move {
                     format!(
                         "{host}/build/{build_id}/jobs",
-                        host = self.travis.host,
-                        build_id = self.build_id
+                        host = host,
+                        build_id = build_id,
                     ).parse()
                         .map_err(Error::from)
-                        .into_future(),
-                )
+                })
                 .and_then(|wrapper: JobsWrapper| future::ok(wrapper.jobs)),
         )
     }

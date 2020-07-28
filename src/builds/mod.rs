@@ -1,11 +1,9 @@
 //! interfaces for interacting with travis builds
 
-use {Branch, Client, Error, Stream, Future, Owner, Pagination, State};
-use futures::{
-    future, stream, Future as StdFuture, IntoFuture, Stream as StdStream
-    };
+use super::{Branch, Client, Error, Stream, Future, Owner, Pagination, State};
+use futures::prelude::*;
 use hyper::client::connect::Connect;
-use jobs::Job;
+use crate::jobs::Job;
 use url::form_urlencoded::Serializer;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -94,7 +92,7 @@ impl Default for ListOptions {
 #[derive(Clone)]
 pub struct Builds<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub(crate) travis: Client<C>,
     pub(crate) slug: String,
@@ -102,21 +100,23 @@ where
 
 impl<C> Builds<C>
 where
-    C: Clone + Connect + 'static,
+    C: Clone + Connect + Send + Sync + 'static,
 {
     pub fn list(&self, options: &ListOptions) -> Future<Vec<Build>> {
-        Box::new(
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        let options = options.into_query_string();
+        Box::pin(
             self.travis
-                .get(
+                .get(async move {
                     format!(
                         "{host}/repo/{slug}/builds?{query}",
-                        host = self.travis.host,
-                        slug = self.slug,
-                        query = options.into_query_string()
+                        host = host,
+                        slug = slug,
+                        query = options,
                     ).parse()
                         .map_err(Error::from)
-                        .into_future(),
-                )
+                })
                 .and_then(|wrapper: Wrapper| future::ok(wrapper.builds)),
         )
     }
@@ -125,18 +125,20 @@ where
         &self,
         options: &ListOptions,
     ) -> Stream<Build> {
+        let host = self.travis.host.clone();
+        let slug = self.slug.clone();
+        let options = options.into_query_string();
         let first = self.travis
-            .get::<Wrapper>(
+            .get::<Wrapper, _>(async move {
                 format!(
                     "{host}/repo/{slug}/builds?{query}",
-                    host = self.travis.host,
-                    slug = self.slug,
-                    query = options.into_query_string()
+                    host = host,
+                    slug = slug,
+                    query = options,
                 ).parse()
                     .map_err(Error::from)
-                    .into_future(),
-            )
-            .map(|mut wrapper: Wrapper| {
+            })
+            .map_ok(|mut wrapper: Wrapper| {
                 let mut builds = wrapper.builds;
                 builds.reverse();
                 wrapper.builds = builds;
@@ -144,48 +146,48 @@ where
             });
         // needed to move "self" into the closure below
         let clone = self.clone();
-        Box::new(
+        Box::pin(
             first
-                .map(move |wrapper| {
-                    stream::unfold::<_, _, Future<(Build, Wrapper)>, _>(
+                .map_ok(move |wrapper| {
+                    stream::try_unfold::<_, _, Future<Option<(Build, Wrapper)>>, _>(
                         wrapper,
                         move |mut state| match state.builds.pop() {
-                            Some(build) => Some(
-                                Box::new(future::ok((build, state))) as
-                                    Future<(Build, Wrapper)>,
-                            ),
+                            Some(build) => Box::pin(future::ok(Some((build, state)))),
                             _ => {
-                                state.pagination.next.clone().map(|path| {
-                                    Box::new(
-                                        clone
-                                            .travis
-                                            .get::<Wrapper>(
-                                                format!(
-                                                    "{host}{path}",
-                                                    host = clone.travis.host,
-                                                    path = path.href
-                                                ).parse()
-                                                    .map_err(Error::from)
-                                                    .into_future(),
-                                            )
-                                            .map(|mut next| {
-                                                let mut builds = next.builds;
-                                                builds.reverse();
-                                                next.builds = builds;
-                                                (
-                                                    next.builds.pop().unwrap(),
-                                                    next,
-                                                )
-                                            }),
-                                    ) as
-                                        Future<(Build, Wrapper)>
-                                })
+                                match state.pagination.next.clone() {
+                                    Some(path) => {
+                                        let host = clone.travis.host.clone();
+                                        Box::pin(
+                                            clone
+                                                .travis
+                                                .get::<Wrapper, _>(async move {
+                                                    format!(
+                                                        "{host}{path}",
+                                                        host = host,
+                                                        path = path.href
+                                                    ).parse()
+                                                        .map_err(Error::from)
+                                                })
+                                                .map_ok(|mut next| {
+                                                    let mut builds = next.builds;
+                                                    builds.reverse();
+                                                    next.builds = builds;
+                                                    Some((
+                                                        next.builds.pop().unwrap(),
+                                                        next,
+                                                    ))
+                                                }),
+                                        ) as
+                                            Future<Option<(Build, Wrapper)>>
+                                    }
+                                    None => Box::pin(future::ok(None)),
+                                }
                             }
                         },
                     )
                 })
                 .into_stream()
-                .flatten(),
+                .try_flatten(),
         )
     }
 }

@@ -232,7 +232,7 @@ fn create_connector() -> Connector {
 type Connector = HttpsConnector<hyper::client::HttpConnector>;
 #[cfg(feature = "rustls")]
 fn create_connector() -> Connector {
-  HttpsConnector::new()
+  HttpsConnector::with_webpki_roots()
 }
 
 #[cfg(any(feature = "tls", feature = "rustls"))]

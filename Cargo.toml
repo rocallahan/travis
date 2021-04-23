@@ -14,12 +14,12 @@ edition = "2018"
 [dependencies]
 futures = "0.3"
 log = "0.4"
-hyper = "0.13"
+hyper = { version = "0.14", features = ["stream"] }
 percent-encoding = "2"
 serde = "1.0.9"
 serde_derive = "1.0.9"
 serde_json = "1.0.2"
-tokio = "0.2"
+tokio = "1"
 url = "2"
 error-chain = "0.12"
 derive_builder = "0.9"
@@ -37,7 +37,8 @@ version = "0.3.1"
 
 [dependencies.hyper-rustls]
 optional = true
-version = "^0.21"
+version = "^0.22"
+features = ["webpki-tokio"]
 
 [features]
 default = ["tls"]
